@@ -17,7 +17,7 @@
                 <tbody>
 <?php
 foreach ($recurring_invoices as $invoice) {
-?>
+    ?>
                     <tr>
                         <td>
                             <span class="label label-<?php echo $invoice->recur_status != 'active' ? 'default' : 'success'; ?>">
@@ -26,7 +26,7 @@ foreach ($recurring_invoices as $invoice) {
                         </td>
                         <td>
                             <a href="<?php echo site_url('invoices/view/' . $invoice->invoice_id); ?>">
-                                <?php echo $invoice->invoice_number; ?>
+                                <?php echo htmlsc($invoice->invoice_number); ?>
                             </a>
                         </td>
                         <td><?php echo anchor('clients/view/' . $invoice->client_id, htmlsc(format_client($invoice))); ?></td>
@@ -61,7 +61,7 @@ foreach ($recurring_invoices as $invoice) {
                     </tr>
 <?php
 }
-?>
+                    ?>
                 </tbody>
 
             </table>

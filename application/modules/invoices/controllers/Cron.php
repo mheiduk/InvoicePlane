@@ -22,7 +22,7 @@ class Cron extends Base_Controller
     public function recur($cron_key = null)
     {
         // Check the provided cron key
-        if ($cron_key != get_setting('cron_key')) {
+        if ( ! hash_equals((string) get_setting('cron_key'), (string) $cron_key)) {
             log_message('error', '[Cron Recurring Invoices] Wrong cron key provided! ' . $cron_key);
             show_error(trans('wrong_cron_key_provided'), 500);
             exit('Wrong cron key!');
@@ -128,21 +128,37 @@ class Cron extends Base_Controller
                 $this->load->model('upload/mdl_uploads');
                 $attachment_files = $this->mdl_uploads->get_invoice_uploads($target_id);
 
+                // Load helper for email body processing
+                $this->load->helper('html_sanitizer');
+
                 // Prepare the body
-                $body = $tpl->email_template_body;
-                if (mb_strlen($body) != mb_strlen(strip_tags($body))) {
-                    $body = htmlspecialchars_decode($body, ENT_COMPAT);
+                // Re-sanitize template body to ensure legacy DB rows are cleaned.
+                // This provides defense-in-depth protection against any templates that may have
+                // been stored before HTML Purifier sanitization was implemented.
+                $body = sanitize_email_template_html($tpl->email_template_body);
+
+                // Apply nl2br only to plain text content (after sanitization)
+                if (is_plain_text($body)) {
+                    // Plain text - convert line breaks to <br> tags
+                    $body = nl2br($body);
+                }
+                // Note: We removed htmlspecialchars_decode() as it was undoing the XSS protection.
+                // The sanitized HTML is used directly without decoding.
+
+                // Determine sender email: use template value, then smtp_mail_from setting, then fall back to user email
+                if ( ! empty($tpl->email_template_from_email)) {
+                    $from = [$tpl->email_template_from_email, $tpl->email_template_from_name];
                 } else {
-                    $body = htmlspecialchars_decode(nl2br($body), ENT_COMPAT);
+                    $default_from_email = get_setting('smtp_mail_from');
+                    if (empty($default_from_email)) {
+                        $default_from_email = $invoice->user_email;
+                    }
+                    $from = [$default_from_email, ''];
                 }
 
-                $from = empty($tpl->email_template_from_email) ?
-                    [$invoice->user_email, ''] :
-                    [$tpl->email_template_from_email, $tpl->email_template_from_name];
-
-                $subject = empty($tpl->email_template_subject) ?
-                    trans('invoice') . ' #' . $new_invoice->invoice_number :
-                    $tpl->email_template_subject;
+                $subject = empty($tpl->email_template_subject)
+                    ? trans('invoice') . ' #' . $new_invoice->invoice_number
+                    : $tpl->email_template_subject;
 
                 $pdf_template = $tpl->email_template_pdf_template;
                 $to           = $invoice->client_email;

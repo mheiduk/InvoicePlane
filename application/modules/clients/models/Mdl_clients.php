@@ -31,7 +31,11 @@ class Mdl_Clients extends Response_Model
 
     public function default_order_by(): void
     {
-        $this->db->order_by('ip_clients.client_name');
+        if (get_setting('sort_clients_by_surname') == '1') {
+            $this->db->order_by('ip_clients.client_surname');
+        } else {
+            $this->db->order_by('ip_clients.client_name');
+        }
     }
 
     public function validation_rules()
@@ -181,9 +185,10 @@ class Mdl_Clients extends Response_Model
     }
 
     /**
-     * Validates the e-invoicing version to prevent path traversal attacks
+     * Validates the e-invoicing version to prevent path traversal attacks.
      *
      * @param string $version The e-invoicing version to validate
+     *
      * @return bool
      */
     public function validate_einvoicing_version($version)
@@ -195,10 +200,11 @@ class Mdl_Clients extends Response_Model
 
         // Load helper to access validation function
         $this->load->helper('e-invoice');
-        
+
         // Validate using the helper function
-        if (!is_valid_xml_config_id($version)) {
+        if ( ! is_valid_xml_config_id($version)) {
             $this->form_validation->set_message('validate_einvoicing_version', trans('einvoicing_version_invalid'));
+
             return false;
         }
 

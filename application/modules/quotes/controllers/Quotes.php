@@ -118,6 +118,8 @@ class Quotes extends Admin_Controller
             show_404();
         }
 
+        $quote->quote_password = $this->mdl_quotes->decrypt_quote_password($quote->quote_password);
+
         $custom_fields = $this->mdl_custom_fields->by_table('ip_quote_custom')->get()->result();
         $custom_values = [];
         foreach ($custom_fields as $custom_field) {
@@ -187,6 +189,18 @@ class Quotes extends Admin_Controller
      */
     public function delete($quote_id)
     {
+        if ( ! $this->ensure_valid_post_request('quotes/index')) {
+            return;
+        }
+
+        $quote = $this->mdl_quotes->get_by_id($quote_id);
+
+        if ( ! $quote) {
+            show_404();
+
+            return;
+        }
+
         // Delete the quote
         $this->mdl_quotes->delete($quote_id);
 
@@ -200,11 +214,16 @@ class Quotes extends Admin_Controller
      */
     public function generate_pdf($quote_id, $stream = true, $quote_template = null)
     {
-        $this->load->helper('pdf');
+        $this->load->helper(['pdf', 'template']);
 
         if (get_setting('mark_quotes_sent_pdf') == 1) {
             $this->mdl_quotes->generate_quote_number_if_applicable($quote_id);
             $this->mdl_quotes->mark_sent($quote_id);
+        }
+
+        // Security: Validate PDF template to prevent LFI
+        if ($quote_template) {
+            $quote_template = validate_pdf_template($quote_template, 'quote', 'pdf_quote_template');
         }
 
         generate_quote_pdf($quote_id, $stream, $quote_template);
@@ -216,6 +235,10 @@ class Quotes extends Admin_Controller
      */
     public function delete_quote_tax(string $quote_id, $quote_tax_rate_id)
     {
+        if ( ! $this->ensure_valid_post_request('quotes/view/' . $quote_id)) {
+            return;
+        }
+
         $this->load->model('quotes/mdl_quote_tax_rates');
         $this->mdl_quote_tax_rates->delete($quote_tax_rate_id);
 

@@ -81,7 +81,6 @@ class Clients extends Admin_Controller
         }
 
         $new_client = false;
-        $this->filter_input();  // <<<--- filters _POST array for nastiness
 
         // Set validation rule based on is_update
         if ($this->input->post('is_update') == 0 && $this->input->post('client_name') != '') {
@@ -353,22 +352,23 @@ class Clients extends Admin_Controller
     private function sanitize_for_log($value): string
     {
         $sanitized = (string) $value;
-        $sanitized = str_replace(array("\r", "\n"), ' ', $sanitized);
+        $sanitized = str_replace(["\r", "\n"], ' ', $sanitized);
 
         return $sanitized;
     }
 
-    private function check_client_einvoice_active($client, $req_einvoicing) {
+    private function check_client_einvoice_active($client, $req_einvoicing)
+    {
         // Update active eInvoicing client
         // Check if database has been migrated to 1.6.3+ (where einvoicing fields were added)
 
         $clientIdForLog = $this->sanitize_for_log($client->client_id);
 
-        if (!property_exists($client, 'client_einvoicing_active') || !property_exists($client, 'client_einvoicing_version')) {
+        if ( ! property_exists($client, 'client_einvoicing_active') || ! property_exists($client, 'client_einvoicing_version')) {
             // Fields don't exist - database hasn't been migrated to 1.6.3+
             $this->load->model('settings/mdl_versions');
-            $current_version = $this->mdl_versions->get_current_version();
-            $current_version = $current_version ?: 'unknown';
+            $current_version      = $this->mdl_versions->get_current_version();
+            $current_version      = $current_version ?: 'unknown';
             $currentVersionForLog = $this->sanitize_for_log($current_version);
 
             log_message('warning', '[eInvoicing] Database version mismatch detected in check_client_einvoice_active: Running source code 1.6.3+ with database version ' . $currentVersionForLog);
@@ -376,13 +376,13 @@ class Clients extends Admin_Controller
             log_message('warning', '[eInvoicing] Please run database migration 039_1.6.3.sql to add these fields');
 
             // Set default values on the client object to prevent further errors
-            $client->client_einvoicing_active = 0;
+            $client->client_einvoicing_active  = 0;
             $client->client_einvoicing_version = '';
 
             return $client;
         }
 
-        $o = $client->client_einvoicing_active;
+        $o                             = $client->client_einvoicing_active;
         $clientEinvoicingVersionForLog = $this->sanitize_for_log($client->client_einvoicing_version);
         log_message('debug', '[eInvoicing] check_client_einvoice_active: client_id=' . $clientIdForLog . ', current_active=' . $o . ', version=' . $clientEinvoicingVersionForLog);
 

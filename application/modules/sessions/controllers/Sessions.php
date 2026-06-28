@@ -16,6 +16,20 @@ if ( ! defined('BASEPATH')) {
 #[AllowDynamicProperties]
 class Sessions extends Base_Controller
 {
+    /**
+     * Maximum allowed password reset token expiry time in minutes (24 hours)
+     * This enforces a security upper limit on how long tokens can remain valid.
+     */
+    private const MAX_PASSWORD_RESET_EXPIRY_MINUTES = 1440;
+
+    /**
+     * UTC timezone instance for consistent timestamp handling
+     * Reused across password reset operations to avoid repeated instantiation.
+     *
+     * @var DateTimeZone
+     */
+    private static $utc_timezone;
+
     public function index()
     {
         redirect('sessions/login');
@@ -28,25 +42,14 @@ class Sessions extends Base_Controller
         ];
 
         if ($this->input->post('btn_login')) {
-            $this->db->where('user_email', $this->input->post('email'));
-            $query = $this->db->get('ip_users');
-            $user  = $query->row();
-
-            // Check if the user exists
-            if (empty($user)) {
-                $this->session->set_flashdata('alert_error', trans('loginalert_user_not_found'));
-                redirect('sessions/login');
-            } elseif ($user->user_active == 0) {
-                // Check if the user is marked as active (not implemented: Todo?)
-                $this->session->set_flashdata('alert_error', trans('loginalert_user_inactive'));
-                redirect('sessions/login');
-            } elseif ($this->authenticate($this->input->post('email'), $this->input->post('password'))) {
+            if ($this->authenticate($this->input->post('email'), $this->input->post('password'))) {
                 if ($this->session->userdata('user_type') == 1) {
                     redirect('dashboard');
                 } elseif ($this->session->userdata('user_type') == 2) {
                     redirect('guest');
                 }
             } else {
+                // Generic message for all failure cases to prevent account/status enumeration.
                 $this->session->set_flashdata('alert_error', trans('loginalert_credentials_incorrect'));
                 redirect('sessions/login');
             }
@@ -62,20 +65,64 @@ class Sessions extends Base_Controller
     public function authenticate($email_address, $password): bool
     {
         $this->load->model('mdl_sessions');
-        //check if user is banned
+
+        // IP-based rate limiting mirrors the password-reset throttle.
+        if ($this->_is_ip_rate_limited_login()) {
+            log_message('warning', 'Login IP rate limit exceeded from: ' . $this->input->ip_address());
+
+            return false;
+        }
+
+        // Per-account lockout (email-keyed).
         $login_log = $this->_login_log_check($email_address);
         if (empty($login_log) || $login_log->log_count < 10) {
             if ($this->mdl_sessions->auth($email_address, $password)) {
                 $this->_login_log_reset($email_address);
+                $this->_reset_ip_login_attempts();
 
                 return true;
             }
 
-            //track failed attempt
             $this->_login_log_addfailure($email_address);
+            $this->_record_ip_login_attempt();
         }
 
         return false;
+    }
+
+    /**
+     * Returns true when the current IP has exceeded the login attempt threshold.
+     */
+    private function _is_ip_rate_limited_login(): bool
+    {
+        $max_attempts   = (int) env('LOGIN_IP_MAX_ATTEMPTS', 20);
+        $window_minutes = (int) env('LOGIN_IP_WINDOW_MINUTES', 15);
+        $session_key    = 'login_attempts_ip_' . md5($this->input->ip_address());
+        $attempts       = $this->session->userdata($session_key) ?: [];
+        $cutoff         = time() - ($window_minutes * 60);
+        $attempts       = array_values(array_filter($attempts, fn ($t) => $t > $cutoff));
+
+        return count($attempts) >= $max_attempts;
+    }
+
+    /**
+     * Records one failed login attempt for the current IP.
+     */
+    private function _record_ip_login_attempt(): void
+    {
+        $session_key = 'login_attempts_ip_' . md5($this->input->ip_address());
+        $attempts    = $this->session->userdata($session_key) ?: [];
+        $attempts[]  = time();
+        $this->session->set_userdata($session_key, $attempts);
+    }
+
+    /**
+     * Clears IP-based login attempt counter on successful authentication.
+     */
+    private function _reset_ip_login_attempts(): void
+    {
+        $session_key = 'login_attempts_ip_' . md5($this->input->ip_address());
+        $this->session->unset_userdata($session_key);
     }
 
     public function logout()
@@ -114,11 +161,42 @@ class Sessions extends Base_Controller
                 // Redirect back to the login screen with an alert
                 $this->session->set_flashdata('alert_error', trans('wrong_passwordreset_token'));
                 redirect('sessions/passwordreset');
-            } else {
-                //if token is valid, delete the failure attempt from
-                //the login_log table
-                $this->_login_log_reset($token);
             }
+
+            // Check if token has expired
+            if ( ! empty($user->user_passwordreset_token_expiry)) {
+                try {
+                    // Initialize UTC timezone if not already done
+                    if ( ! isset(self::$utc_timezone)) {
+                        self::$utc_timezone = new DateTimeZone('UTC');
+                    }
+
+                    // Use UTC timezone for consistent timestamp comparison
+                    $expiry_time  = new DateTime($user->user_passwordreset_token_expiry, self::$utc_timezone);
+                    $current_time = new DateTime('now', self::$utc_timezone);
+
+                    if ($current_time > $expiry_time) {
+                        // Token has expired, clear it from database
+                        $this->_clear_password_reset_token($user->user_id);
+
+                        $this->load->helper('file_security');
+                        log_message('info', 'Expired password reset token used for user ID: ' . sanitize_for_logging($user->user_id));
+                        $this->session->set_flashdata('alert_error', trans('password_reset_token_expired'));
+                        redirect('sessions/passwordreset');
+                    }
+                } catch (Exception $e) {
+                    // Invalid datetime format in database, clear the token for safety
+                    $this->load->helper('file_security');
+                    log_message('error', 'Invalid password reset token expiry format for user ID: ' . sanitize_for_logging($user->user_id));
+                    $this->_clear_password_reset_token($user->user_id);
+                    $this->session->set_flashdata('alert_error', trans('wrong_passwordreset_token'));
+                    redirect('sessions/passwordreset');
+                }
+            }
+
+            //if token is valid, delete the failure attempt from
+            //the login_log table
+            $this->_login_log_reset($token);
 
             $formdata = [
                 'token'   => $token,
@@ -159,17 +237,12 @@ class Sessions extends Base_Controller
                 $new_password
             );
 
-            // Update the user and set him active again
-            $db_array = [
-                'user_passwordreset_token' => '',
-            ];
+            // Clear the password reset token and expiry
+            $this->_clear_password_reset_token($user_id);
 
-            //delete failed attempts from login_log table
+            // Delete failed login attempts from login_log table
             $user = $this->db->where('user_id', $user_id)->get('ip_users')->row();
             $this->_login_log_reset($user->user_email);
-
-            $this->db->where('user_id', $user_id);
-            $this->db->update('ip_users', $db_array);
 
             // Redirect back to the login form
             redirect('sessions/login');
@@ -215,18 +288,47 @@ class Sessions extends Base_Controller
             // Test if a user with this email exists
             $this->db->where('user_email', $email);
             $user = $this->db->get('ip_users')->row();
-            
+
             // Security: Always show the same message regardless of whether email exists
             // This prevents email enumeration attacks
             if ($user) {
                 // User exists - send actual reset email
-                //use salt to prevent predictability of the reset token (CVE-2021-29023)
-                $this->load->library('crypt');
-                $token = md5(time() . $email . $this->crypt->salt());
+                // Use cryptographically secure token generation (fixes CVE-2021-29023)
+                $this->load->helper('ip_security');
+                $token = generate_password_reset_token();
 
-                // Save the token to the database
+                // Calculate token expiry time (default: 15 minutes from now)
+                $expiry_minutes = (int) env('PASSWORD_RESET_TOKEN_EXPIRY_MINUTES', 15);
+
+                // Validate expiry_minutes is within acceptable range (1-1440 minutes)
+                // Maximum is defined by MAX_PASSWORD_RESET_EXPIRY_MINUTES (24 hours) for security
+                if ($expiry_minutes < 1 || $expiry_minutes > self::MAX_PASSWORD_RESET_EXPIRY_MINUTES) {
+                    // Invalid value, use default of 15 minutes
+                    $expiry_minutes = 15;
+                    log_message('warning', 'Invalid PASSWORD_RESET_TOKEN_EXPIRY_MINUTES value, using default 15 minutes');
+                }
+
+                try {
+                    // Initialize UTC timezone if not already done
+                    if ( ! isset(self::$utc_timezone)) {
+                        self::$utc_timezone = new DateTimeZone('UTC');
+                    }
+
+                    // Use UTC timezone for consistent timestamp storage
+                    $expiry_time = new DateTime('now', self::$utc_timezone);
+                    $expiry_time->modify('+' . $expiry_minutes . ' minutes');
+                    $expiry_timestamp = $expiry_time->format('Y-m-d H:i:s');
+                } catch (Exception $e) {
+                    // Fallback to simple timestamp calculation if DateTime fails
+                    // Use gmdate() to maintain UTC consistency
+                    log_message('error', 'DateTime creation failed, using fallback: ' . $e->getMessage());
+                    $expiry_timestamp = gmdate('Y-m-d H:i:s', time() + ($expiry_minutes * 60));
+                }
+
+                // Save the token and expiry to the database
                 $db_array = [
-                    'user_passwordreset_token' => $token,
+                    'user_passwordreset_token'        => $token,
+                    'user_passwordreset_token_expiry' => $expiry_timestamp,
                 ];
 
                 $this->db->where('user_email', $email);
@@ -321,71 +423,72 @@ class Sessions extends Base_Controller
     }
 
     /**
-     * Check if IP address has exceeded rate limit for password resets using session storage
+     * Check if IP address has exceeded rate limit for password resets using session storage.
      *
-     * @param int $max_attempts Maximum attempts allowed per hour
+     * @param int $max_attempts   Maximum attempts allowed per hour
      * @param int $window_minutes Time window in minutes
      *
      * @return bool True if rate limited, false otherwise
      */
     private function _is_ip_rate_limited_password_reset()
     {
-        $max_attempts = env('PASSWORD_RESET_IP_MAX_ATTEMPTS', 5);
+        $max_attempts   = env('PASSWORD_RESET_IP_MAX_ATTEMPTS', 5);
         $window_minutes = env('PASSWORD_RESET_IP_WINDOW_MINUTES', 60);
-        
-        $ip_address = $this->input->ip_address();
+
+        $ip_address  = $this->input->ip_address();
         $session_key = 'password_reset_attempts_' . md5($ip_address);
-        
+
         // Get current attempts from session
         $attempts = $this->session->userdata($session_key);
-        
-        if (!$attempts) {
+
+        if ( ! $attempts) {
             $attempts = [];
         }
-        
+
         // Clean up old attempts outside the time window
         $cutoff_time = time() - ($window_minutes * 60);
-        $attempts = array_filter($attempts, function($timestamp) use ($cutoff_time) {
+        $attempts    = array_filter($attempts, function ($timestamp) use ($cutoff_time) {
             return $timestamp > $cutoff_time;
         });
-        
+
         // Check if rate limited
         if (count($attempts) >= $max_attempts) {
             log_message('info', trans('log_ip_rate_limit_check') . ': ' . count($attempts) . ' attempts from IP: ' . $ip_address);
+
             return true;
         }
-        
+
         return false;
     }
 
     /**
-     * Record a password reset attempt for the current IP
+     * Record a password reset attempt for the current IP.
      */
     private function _record_password_reset_attempt()
     {
-        $ip_address = $this->input->ip_address();
+        $ip_address  = $this->input->ip_address();
         $session_key = 'password_reset_attempts_' . md5($ip_address);
-        
+
         // Get current attempts from session
         $attempts = $this->session->userdata($session_key);
-        
-        if (!$attempts) {
+
+        if ( ! $attempts) {
             $attempts = [];
         }
-        
+
         // Add current timestamp
         $attempts[] = time();
-        
+
         // Store back to session
         $this->session->set_userdata($session_key, $attempts);
     }
 
     /**
-     * Check if email-based rate limit exceeded for password resets using session storage
+     * Check if email-based rate limit exceeded for password resets using session storage.
      *
-     * @param string $email Email address to check
-     * @param int $max_attempts Maximum attempts allowed
-     * @param int $window_hours Time window in hours
+     * @param string $email        Email address to check
+     * @param int    $max_attempts Maximum attempts allowed
+     * @param int    $window_hours Time window in hours
      *
      * @return bool True if rate limited, false otherwise
      */
@@ -393,63 +496,64 @@ class Sessions extends Base_Controller
     {
         $max_attempts = env('PASSWORD_RESET_EMAIL_MAX_ATTEMPTS', 3);
         $window_hours = env('PASSWORD_RESET_EMAIL_WINDOW_HOURS', 1);
-    
+
         $session_key = 'password_reset_email_' . md5($email);
-        
+
         // Get current attempts from session
         $attempts = $this->session->userdata($session_key);
-        
-        if (!$attempts) {
+
+        if ( ! $attempts) {
             $attempts = [];
         }
-        
+
         // Clean up old attempts outside the time window
         $cutoff_time = time() - ($window_hours * 3600);
-        $attempts = array_filter($attempts, function($timestamp) use ($cutoff_time) {
+        $attempts    = array_filter($attempts, function ($timestamp) use ($cutoff_time) {
             return $timestamp > $cutoff_time;
         });
-        
+
         // Check if rate limited
         if (count($attempts) >= $max_attempts) {
             log_message('info', trans('log_email_rate_limit_check') . ': ' . count($attempts) . ' attempts for email: ' . $email);
+
             return true;
         }
-        
+
         return false;
     }
 
     /**
-     * Record a password reset attempt for a specific email
+     * Record a password reset attempt for a specific email.
      *
      * @param string $email Email address
      */
     private function _record_email_password_reset_attempt($email)
     {
         $session_key = 'password_reset_email_' . md5($email);
-        
+
         // Get current attempts from session
         $attempts = $this->session->userdata($session_key);
-        
-        if (!$attempts) {
+
+        if ( ! $attempts) {
             $attempts = [];
         }
-        
+
         // Add current timestamp
         $attempts[] = time();
-        
+
         // Store back to session
         $this->session->set_userdata($session_key, $attempts);
     }
 
     /**
-     * Check if the current request is from an automated tool or bot
+     * Check if the current request is from an automated tool or bot.
      *
      * @return bool True if bot/automated tool detected, false otherwise
      */
     private function _is_bot_request()
     {
         $user_agent = $this->input->user_agent();
-        
+
         // List of common automated tools and bots
         $bot_signatures = [
             'curl',
@@ -468,20 +572,20 @@ class Sessions extends Base_Controller
             'insomnia',
             'paw/',
         ];
-        
+
         // Check if user agent is empty (common with automated tools)
         if (empty($user_agent)) {
             return true;
         }
-        
+
         // Check if user agent contains any bot signatures (case-insensitive)
-        $user_agent_lower = strtolower($user_agent);
+        $user_agent_lower = mb_strtolower($user_agent);
         foreach ($bot_signatures as $signature) {
-            if (strpos($user_agent_lower, $signature) !== false) {
+            if (str_contains($user_agent_lower, $signature)) {
                 return true;
             }
         }
-        
+
         return false;
     }
 
@@ -524,31 +628,58 @@ class Sessions extends Base_Controller
     }
 
     /**
+     * Clears the password reset token and expiry for a user.
+     * Helper method to avoid code duplication.
+     *
+     * @param int $user_id The user ID (will be type-cast to ensure it's an integer)
+     */
+    private function _clear_password_reset_token($user_id): void
+    {
+        // Ensure user_id is an integer for safety
+        $user_id = (int) $user_id;
+
+        $this->db->where('user_id', $user_id);
+        $this->db->update('ip_users', [
+            'user_passwordreset_token'        => '',
+            'user_passwordreset_token_expiry' => null,
+        ]);
+    }
+
+    /**
      * Validates that a referer URL is from the same domain
-     * to prevent open redirect vulnerabilities
+     * to prevent open redirect vulnerabilities.
      *
      * @param string $referer
+     *
      * @return string Safe redirect URL
      */
     private function _get_safe_referer($referer = '')
     {
-        // Use provided referer or HTTP_REFERER
+        $default = 'sessions/passwordreset';
+
         $referer = empty($referer) ? ($_SERVER['HTTP_REFERER'] ?? '') : $referer;
-        
-        // If no referer, use default
+
         if (empty($referer)) {
-            return 'sessions/passwordreset';
+            return $default;
         }
-        
-        // Get base URL
+
         $base_url = base_url();
-        
-        // Check if referer starts with base URL (same domain)
-        if (strpos($referer, $base_url) === 0) {
-            return $referer;
+
+        // If base_url is not configured, str_starts_with($referer, '') is always true
+        // and any external URL would pass. Reject to be safe.
+        if (empty($base_url)) {
+            return $default;
         }
-        
-        // Referer is external or invalid, use safe default
-        return 'sessions/passwordreset';
+
+        // Compare parsed hosts rather than string prefixes to resist
+        // bypass attempts such as https://example.com.evil.com/...
+        $referer_host  = parse_url($referer, PHP_URL_HOST);
+        $base_host     = parse_url($base_url, PHP_URL_HOST);
+
+        if ( ! $referer_host || ! $base_host || $referer_host !== $base_host) {
+            return $default;
+        }
+
+        return $referer;
     }
 }

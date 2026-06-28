@@ -14,7 +14,7 @@ $client_id = '';
 foreach ($results as $result) {
     if ($client_id != $result->client_id) {
         $client_id = $result->client_id;
-?>
+        ?>
         <tr>
             <th><?php _htmlsc(format_client($result)); ?></th>
             <th></th>
@@ -22,10 +22,10 @@ foreach ($results as $result) {
         </tr>
 <?php
     }
-?>
+    ?>
         <tr>
             <td><?php echo date_from_mysql($result->invoice_date_created, true); ?></td>
-            <td><?php echo $result->invoice_number; ?></td>
+            <td><?php echo htmlsc($result->invoice_number); ?></td>
             <td class="amount"><?php echo format_currency($result->invoice_total); ?></td>
         </tr>
 <?php

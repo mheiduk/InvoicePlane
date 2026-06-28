@@ -398,12 +398,25 @@
                             <label for="login_logo">
                                 <?php _trans('login_logo'); ?>
                             </label>
-                            <?php if (get_setting('login_logo')) { ?>
+                            <?php if (get_setting('login_logo')) {
+                                $login_logo_file = get_setting('login_logo');
+                                $extension       = mb_strtolower(pathinfo($login_logo_file, PATHINFO_EXTENSION));
+                                if ($extension === 'svg') {
+                                    // Security: SVG files are blocked
+                                    ?>
+                                <br/>
+                                <div class="alert alert-danger">
+                                    <strong><?php _trans('warning'); ?>:</strong> 
+                                    <?php _trans('svg_logo_blocked_security'); ?> 
+                                    <?php echo anchor('settings/remove_logo/login', trans('remove_logo')); ?>
+                                </div>
+                            <?php } else { ?>
                                 <br/>
                                 <img class="personal_logo"
-                                    src="<?php echo base_url(); ?>uploads/<?php echo get_setting('login_logo'); ?>"><br>
+                                    src="<?php echo base_url(); ?>uploads/<?php echo htmlsc($login_logo_file); ?>"><br>
                                 <?php echo anchor('settings/remove_logo/login', trans('remove_logo')); ?><br/>
-                            <?php } ?>
+                            <?php }
+                            } ?>
                             <input type="file" name="login_logo" id="login_logo" class="form-control"/>
                         </div>
                     </div>
@@ -478,7 +491,7 @@
                             </label>
                             <div class="input-group">
                                 <input type="text" name="settings[cron_key]" id="cron_key" class="form-control" readonly
-                                    value="<?php echo get_setting('cron_key'); ?>">
+                                    value="<?php echo html_escape(get_setting('cron_key')); ?>">
                                 <div class="input-group-btn">
                                     <button id="btn_generate_cron_key" type="button" class="btn btn-primary btn-block">
                                         <i class="fa fa-recycle fa-margin"></i> <?php _trans('generate'); ?>

@@ -107,7 +107,7 @@ switch (ENVIRONMENT) {
  * This variable must contain the name of your "system" directory.
  * Set the path if it is not in the same directory as this file.
  */
-$system_path = 'vendor/codeigniter/framework/system';
+$system_path = 'vendor/pocketarc/codeigniter/system';
 
 /*
  *---------------------------------------------------------------
@@ -301,6 +301,10 @@ define('UPLOADS_TEMP_MPDF_FOLDER', UPLOADS_TEMP_FOLDER . 'mpdf' . DIRECTORY_SEPA
 
 define('VIEWPATH', $view_folder . DIRECTORY_SEPARATOR);
 define('THEME_FOLDER', FCPATH . 'assets' . DIRECTORY_SEPARATOR);
+
+$_custom_tpl = env('CUSTOM_TEMPLATES_FOLDER');
+define('CUSTOM_TEMPLATES_FOLDER', $_custom_tpl ? rtrim($_custom_tpl, '/\\') . DIRECTORY_SEPARATOR : null);
+unset($_custom_tpl);
 
 // Automatic temp pdf & xml files cleanup
 $files = array_merge(
