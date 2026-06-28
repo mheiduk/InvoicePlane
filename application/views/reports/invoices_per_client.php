@@ -16,7 +16,14 @@ foreach ($results as $result) {
         $client_id = $result->client_id;
         ?>
         <tr>
-            <th><?php _htmlsc(format_client($result)); ?></th>
+            <th>
+                <?php
+                // consider custom field 'Kürzel'
+                if ($result->client_custom_fieldvalue) {
+                    echo $result->client_custom_fieldvalue;
+                } else {
+                    _htmlsc(format_client($result));
+                } ?></th>
             <th></th>
             <th></th>
         </tr>
